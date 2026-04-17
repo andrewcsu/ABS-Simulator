@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "abs_sim"
+version = "0.1.0"
+description = "Python ABS (Anti-lock Braking System) simulator with physics, control, and pygame visualization"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Data 442 Team"}]
+dependencies = [
+    "numpy>=1.23,<3.0",
+    "pygame-ce>=2.5,<3.0",
+    "pygame_gui>=0.6.9,<0.7",
+    "pyyaml>=5.4,<7.0",
+    "pandas>=2.0,<3.0",
+    "matplotlib>=3.7,<4.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0,<9.0"]
+
+[tool.setuptools.packages.find]
+include = ["abs_sim*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

@@ -1,0 +1,12 @@
+name: figure_8_icy
+width: 10.0
+start: {x: 0.0, y: 0.0, heading: 0.0}
+segments:
+  - {type: straight, length: 120.0, surface: dry}
+  - {type: arc, radius: 35.0, angle: 3.14159, direction: left, surface: dry}
+  - {type: straight, length: 120.0, surface: dry}
+  - {type: arc, radius: 35.0, angle: 6.28318, direction: right, surface: dry}
+  - {type: straight, length: 120.0, surface: dry}
+  - {type: arc, radius: 35.0, angle: 3.14159, direction: left, surface: dry}
+surface_patches:
+  - {start_s: 200.0, end_s: 250.0, surface: ice}

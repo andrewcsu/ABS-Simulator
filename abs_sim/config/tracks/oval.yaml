@@ -1,0 +1,10 @@
+name: oval_wet_patch
+width: 10.0
+start: {x: 0.0, y: 0.0, heading: 0.0}
+segments:
+  - {type: straight, length: 200.0, surface: dry}
+  - {type: arc, radius: 50.0, angle: 3.14159, direction: left, surface: dry}
+  - {type: straight, length: 200.0, surface: dry}
+  - {type: arc, radius: 50.0, angle: 3.14159, direction: left, surface: dry}
+surface_patches:
+  - {start_s: 150.0, end_s: 180.0, surface: wet}

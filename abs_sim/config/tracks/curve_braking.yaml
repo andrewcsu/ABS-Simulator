@@ -1,0 +1,7 @@
+name: curve_braking_demo
+width: 12.0
+start: {x: 0.0, y: 0.0, heading: 0.0}
+segments:
+  - {type: straight, length: 350.0, surface: dry}
+  - {type: arc, radius: 35.0, angle: 2.3562, direction: left, surface: dry}
+  - {type: straight, length: 150.0, surface: dry}
