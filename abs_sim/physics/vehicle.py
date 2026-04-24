@@ -21,10 +21,13 @@ Inputs (held constant through a single RK4 step):
 
 Notes
 -----
-Load transfer is computed quasi-statically from body accelerations cached from
-the previous step (or previous derivative evaluation), which is the standard
-control-oriented approximation: avoids a fixpoint inside RK4 and still
-captures the dominant longitudinal weight-shift behavior under braking.
+Load transfer is computed quasi-statically from body-frame SPECIFIC FORCES
+(Fx/m, Fy/m -- the accelerometer-style signal) cached from the previous
+step, which is the standard control-oriented approximation: avoids a
+fixpoint inside RK4 and still captures the dominant weight-shift behavior
+under braking AND cornering. Note: velocity derivatives (dvx/dt, dvy/dt)
+are NOT the right input for load transfer -- during steady cornering
+dvy/dt goes to zero while the physical lateral acceleration is r*vx.
 """
 
 from __future__ import annotations
@@ -59,6 +62,28 @@ class VehicleInputs:
     drive_torque: float = 0.0                  # Nm, positive = accelerating
     brake_pressure: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     mu: Tuple[float, float, float, float] = (0.9, 0.9, 0.9, 0.9)
+    tcs_enabled: bool = True                   # simple engine-side traction control
+
+
+# Per-driven-wheel drive-torque cap as a fraction of tire peak grip
+# (mu*Fz*R). Must stay STRICTLY BELOW 1.0 so the wheel equilibrates in
+# the stable pre-peak region of the mu-slip curve; a value >= 1 parks the
+# operating point at or past the friction peak, where the tire's Fx
+# derivative vs kappa is zero or negative and any excess torque spins the
+# wheel up without bound. 0.85 leaves enough margin for the wheel to
+# actually accelerate the car while still preventing the inside rear from
+# entering positive-feedback wheelspin on corner exit.
+TCS_CAP_FRACTION: float = 0.85
+
+# Kappa above which TCS aggressively cuts drive torque (primarily a
+# backstop for transients the static cap alone can't catch fast enough).
+TCS_CUT_KAPPA: float = 0.25
+
+# Characteristic spin rate (rad/s) over which the brake-torque sign switches.
+# ~1 rad/s corresponds to ~0.3 m/s wheel-edge speed, small enough to be
+# indistinguishable from a locked wheel while still giving a continuous
+# derivative for the RK4 integrator to stage against.
+BRAKE_SMOOTH_W: float = 1.0
 
 
 def default_wheels(tire: DugoffTire | None = None) -> List[WheelParams]:
@@ -198,22 +223,54 @@ class Vehicle:
             Fy_body_total += Fy_b
             Mz_total += wp.x_offset * Fy_b - wp.y_offset * Fx_b
 
-            T_drive = T_drive_each if wp.driven else 0.0
-            T_brake_i = inputs.brake_pressure[i] * wp.brake_torque_max
-            if w[i] > 0.0:
-                T_brake_signed = -T_brake_i
-            elif w[i] < 0.0:
-                T_brake_signed = +T_brake_i
+            if wp.driven:
+                T_drive = T_drive_each
+                if inputs.tcs_enabled:
+                    tire_cap = max(
+                        inputs.mu[i] * kin[i].Fz * wp.tire.R * TCS_CAP_FRACTION,
+                        0.0,
+                    )
+                    # Static pre-peak cap keeps the equilibrium slip stable.
+                    if T_drive > tire_cap:
+                        T_drive = tire_cap
+                    elif T_drive < -tire_cap:
+                        T_drive = -tire_cap
+                    # Dynamic cut if the wheel is already past peak slip
+                    # (e.g. briefly during the load-transfer transient at
+                    # corner exit): scale the drive torque down toward zero
+                    # so the wheel can decelerate back into the pre-peak region.
+                    if T_drive > 0.0 and kin[i].kappa > TCS_CUT_KAPPA:
+                        cut = max(0.0, 1.0 - (kin[i].kappa - TCS_CUT_KAPPA) * 8.0)
+                        T_drive *= cut
+                    elif T_drive < 0.0 and kin[i].kappa < -TCS_CUT_KAPPA:
+                        cut = max(0.0, 1.0 - (-kin[i].kappa - TCS_CUT_KAPPA) * 8.0)
+                        T_drive *= cut
             else:
-                T_brake_signed = 0.0
+                T_drive = 0.0
+            T_brake_i = inputs.brake_pressure[i] * wp.brake_torque_max
+            # Smooth Coulomb brake friction: T_brake_signed = -T_brake_i * sign(w)
+            # but with a linear transition through w=0. A hard sign flip causes
+            # the RK4 stages (which re-evaluate w at s + 0.5*dt*k1 etc.) to
+            # chatter between +T_brake and -T_brake when the wheel is near lock,
+            # injecting spurious high-frequency torque.
+            w_i = float(w[i])
+            smooth = math.tanh(w_i / BRAKE_SMOOTH_W)
+            T_brake_signed = -T_brake_i * smooth
             d_omega[i] = (T_drive + T_brake_signed - wp.tire.R * kin[i].Fx_tire) / wp.J
 
         # Aerodynamic drag (along body x, always opposing motion)
         F_drag = 0.5 * p.rho_air * p.Cd_A * vx * abs(vx)
         Fx_body_total -= F_drag
 
-        ax_body = Fx_body_total / p.mass + r * vy
-        ay_body = Fy_body_total / p.mass - r * vx
+        # Body-frame specific forces (Fx/m, Fy/m). These are what an
+        # accelerometer rigidly attached to the body would read, and what
+        # load_transfer() needs for its d'Alembert inertial-force formula.
+        # The velocity derivatives (dvx/dt, dvy/dt) include Coriolis terms
+        # (r*vy, -r*vx) and are NOT the right inputs for load transfer --
+        # during steady cornering dvy/dt goes to zero while the real
+        # lateral accel is r*vx.
+        ax_spec = Fx_body_total / p.mass
+        ay_spec = Fy_body_total / p.mass
         dr = Mz_total / p.Izz
 
         cpsi = math.cos(psi)
@@ -221,8 +278,8 @@ class Vehicle:
         dx = cpsi * vx - spsi * vy
         dy = spsi * vx + cpsi * vy
         dpsi = r
-        dvx = ax_body
-        dvy = ay_body
+        dvx = ax_spec + r * vy
+        dvy = ay_spec - r * vx
 
         dstate = np.empty(STATE_DIM)
         dstate[0] = dx
@@ -232,7 +289,7 @@ class Vehicle:
         dstate[4] = dvy
         dstate[5] = dr
         dstate[6:10] = d_omega
-        return dstate, float(ax_body), float(ay_body), kin
+        return dstate, float(ax_spec), float(ay_spec), kin
 
     # ------------------------------------------------------------------ #
     # Integrator
@@ -268,8 +325,14 @@ class Vehicle:
     def wheel_kinematics(self) -> List[WheelKinematics]:
         return list(self._last_kin)
 
-    def ax_body(self) -> float: return self._last_ax
-    def ay_body(self) -> float: return self._last_ay
+    def ax_body(self) -> float:
+        """Body-frame longitudinal specific force (Fx/m), i.e. what a body-
+        mounted accelerometer would read. Same quantity fed to load_transfer."""
+        return self._last_ax
+
+    def ay_body(self) -> float:
+        """Body-frame lateral specific force (Fy/m)."""
+        return self._last_ay
 
     def static_loads(self) -> Tuple[float, float, float, float]:
         return static_loads(self.chassis)

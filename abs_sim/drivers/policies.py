@@ -61,11 +61,24 @@ class Driver(ABC):
 # Helpers
 # --------------------------------------------------------------------------- #
 
+def _lookahead_s(track: Track, s: float, lookahead: float) -> float:
+    """Return the arc length to sample `lookahead` meters ahead of `s`.
+
+    On a closed track the result can wrap past `total_length`; on an open
+    track we clamp so pure-pursuit doesn't teleport its target back to the
+    start of the track via `sample()`'s implicit `s % L`.
+    """
+    s_ahead = s + lookahead
+    if track.is_closed:
+        return s_ahead
+    return min(s_ahead, track.total_length)
+
+
 def pure_pursuit_steer(
     ctx: DriverContext, track: Track, s: float, lookahead: float,
 ) -> float:
     """Pure-pursuit front steer angle targeting a point lookahead down the track."""
-    tx, ty, _, _, _ = track.sample(s + lookahead)
+    tx, ty, _, _, _ = track.sample(_lookahead_s(track, s, lookahead))
     dx = tx - ctx.x
     dy = ty - ctx.y
     bearing = math.atan2(dy, dx)
@@ -89,8 +102,12 @@ def curvature_limited_target_speed(
     """
     v_target = v_cruise
     d = step
+    L = track.total_length
+    closed = track.is_closed
     while d < horizon:
         s_ahead = s + d
+        if not closed and s_ahead > L:
+            break  # don't wrap around the start of an open track
         _, _, _, curv, _ = track.sample(s_ahead)
         if curv != 0.0:
             R = 1.0 / abs(curv)
@@ -125,11 +142,20 @@ class CruisePursuitDriver(Driver):
     lookahead_k: float = 0.3
     kp_v: float = 0.6
     ki_v: float = 0.4
+    # Pedal slew-rate (units of demand / second). A real driver's foot can
+    # go from idle to full throttle in ~0.5 s; without this limit the PI
+    # saturates to 1.0 the instant a curvature-limited v_target steps
+    # from ~12 to ~30 m/s at corner exit, overwhelming TCS and producing
+    # rear-wheelspin that cascades into a spin-out.
+    throttle_rate: float = 2.5       # 0 -> 1 in 0.4 s
+    brake_rate: float = 5.0          # brake can rise a bit faster
     name: str = "cruise"
     color: tuple = (60, 200, 255)
 
     _pid_v: PID = field(default=None)  # type: ignore[assignment]
     _last_s: float = 0.0
+    _last_throttle: float = 0.0
+    _last_brake: float = 0.0
 
     def __post_init__(self) -> None:
         self._pid_v = PID(self.kp_v, self.ki_v, 0.0, i_min=-2.0, i_max=2.0)
@@ -137,11 +163,23 @@ class CruisePursuitDriver(Driver):
     def reset(self) -> None:
         self._pid_v.reset()
         self._last_s = 0.0
+        self._last_throttle = 0.0
+        self._last_brake = 0.0
 
     def _target_speed(self, track: Track, s: float) -> float:
         return curvature_limited_target_speed(
             track, s, self.v_cruise, self.mu_assumed,
         )
+
+    @staticmethod
+    def _slew(current: float, target: float, rate: float, dt: float) -> float:
+        max_step = rate * dt
+        delta = target - current
+        if delta > max_step:
+            return current + max_step
+        if delta < -max_step:
+            return current - max_step
+        return target
 
     def update(self, ctx: DriverContext, track: Track, dt: float) -> DriverCommand:
         s, _ = track.closest(ctx.x, ctx.y, s_hint=self._last_s)
@@ -153,11 +191,16 @@ class CruisePursuitDriver(Driver):
         err = v_target - ctx.speed
         u = self._pid_v.update(err, dt)
         if u > 0.0:
-            throttle = min(u, 1.0)
-            brake = 0.0
+            throttle_target = min(u, 1.0)
+            brake_target = 0.0
         else:
-            throttle = 0.0
-            brake = min(-u, 1.0)
+            throttle_target = 0.0
+            brake_target = min(-u, 1.0)
+
+        throttle = self._slew(self._last_throttle, throttle_target, self.throttle_rate, dt)
+        brake = self._slew(self._last_brake, brake_target, self.brake_rate, dt)
+        self._last_throttle = throttle
+        self._last_brake = brake
         return DriverCommand(throttle=throttle, brake_demand=brake, steer=steer)
 
 

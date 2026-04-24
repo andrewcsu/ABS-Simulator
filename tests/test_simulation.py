@@ -10,7 +10,7 @@ from abs_sim.drivers.policies import CruisePursuitDriver, CurveBrakeDelayDriver
 from abs_sim.sim.events import force_brake, set_surface_override
 from abs_sim.sim.simulation import Car, Simulation
 from abs_sim.sim.telemetry import TelemetryLogger
-from abs_sim.track.presets import curve_braking_scenario, straight_road
+from abs_sim.track.presets import curve_braking_scenario, f1_like, straight_road
 
 
 def _run_straight_braking(use_abs: bool, mu_name: str = "snow", v0: float = 20.0):
@@ -74,6 +74,57 @@ def test_telemetry_captures_expected_fields():
     }
     missing = required - set(rows[-1].keys())
     assert not missing
+
+
+def test_f1_like_car_clears_first_corner_without_spinning():
+    """Regression test for interactive spin-out.
+
+    On the `f1_like` preset, the CruisePursuitDriver brakes hard into a 20 m
+    right-hander at ~12 m/s then, at corner exit, sees curvature drop to zero
+    and wants to accelerate back to v_cruise. Without a driver throttle slew
+    rate and a per-wheel drive-torque cap (simple TCS), the inside rear
+    unloads, PI floors the throttle, and 2 kNm of drive torque per wheel
+    blows past the ~400 Nm tire limit causing runaway wheelspin and yaw
+    divergence. This test runs the same scenario headlessly and asserts the
+    yaw rate stays bounded and slip stays well below lock.
+    """
+    track = f1_like()
+    car = Car.make_default(
+        name="ego", driver=CruisePursuitDriver(v_cruise=30.0),
+    )
+    car.vehicle.set_pose(0.0, 0.0, 0.0)
+    car.vehicle.set_speed(30.0)
+    sim = Simulation(track=track, cars=[car], telemetry=TelemetryLogger(in_memory=True))
+
+    # 18 s covers the straight -> 20m right -> short straight; past this the
+    # car is well clear of the first corner and back on throttle.
+    max_kappa = 0.0
+    max_yaw_rate = 0.0
+    while sim.time < 18.0:
+        sim.step()
+        kin = car.vehicle.wheel_kinematics()
+        for k in kin:
+            if abs(k.kappa) > max_kappa:
+                max_kappa = abs(k.kappa)
+        if abs(car.vehicle.r) > max_yaw_rate:
+            max_yaw_rate = abs(car.vehicle.r)
+
+    # Peak |kappa| during a healthy cycle is the ABS target (~lambda_opt=0.15)
+    # plus ABS cycling overshoot. A value under ~0.6 means no wheel is near
+    # lock; under ~1.0 means definitely not a fully-locked or fully-spun
+    # wheel. Pre-fix the inside rear reached kappa > 2000 from wheelspin.
+    assert max_kappa < 1.0, f"wheel-slip runaway: max |kappa|={max_kappa:.2f}"
+    # 3.5 rad/s ~ 200 deg/s is an aggressive but controllable yaw; >>5 rad/s
+    # indicates the body is spinning about its CG.
+    assert max_yaw_rate < 3.5, f"yaw divergence: max |r|={max_yaw_rate:.2f} rad/s"
+    # And it should actually be past the first corner (exit is ~ (320, -20)).
+    assert car.vehicle.x > 310.0
+    # Heading should be somewhere near -90 deg (i.e. not still spinning).
+    # Wrap to [-pi, pi] first.
+    psi = math.atan2(math.sin(car.vehicle.psi), math.cos(car.vehicle.psi))
+    assert abs(psi - (-math.pi / 2.0)) < math.radians(45.0), (
+        f"car heading after first corner = {math.degrees(psi):.1f} deg; expected near -90"
+    )
 
 
 def test_curve_braking_three_drivers_each_run():

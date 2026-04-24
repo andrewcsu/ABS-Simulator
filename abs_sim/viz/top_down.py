@@ -136,12 +136,23 @@ class TrackRenderer:
         body_width: float = 1.9,
     ) -> None:
         prev_clip = surf.get_clip()
-        surf.set_clip(pygame.Rect(cam.viewport_x, cam.viewport_y, cam.w, cam.h))
+        viewport = pygame.Rect(cam.viewport_x, cam.viewport_y, cam.w, cam.h)
+        surf.set_clip(viewport)
         try:
             if tire_mark_buffer:
+                # set_at() does NOT respect the surface clip rect and will
+                # raise IndexError for pixels outside the main surface, so
+                # filter the points against the viewport ourselves. We draw
+                # a 2x2 rect instead of a single pixel for visibility.
+                vp_left = viewport.left
+                vp_top = viewport.top
+                vp_right = viewport.right
+                vp_bottom = viewport.bottom
+                mark_color = (20, 20, 22)
                 for x, y in tire_mark_buffer:
                     px, py = cam.world_to_screen(x, y)
-                    surf.set_at((px, py), (20, 20, 22))
+                    if vp_left <= px < vp_right and vp_top <= py < vp_bottom:
+                        surf.fill(mark_color, (px, py, 2, 2))
 
             v = car.vehicle
             c, s = math.cos(v.psi), math.sin(v.psi)

@@ -129,7 +129,12 @@ class PygameApp:
             ("lambda_opt", "ABS target slip", 0.02, 0.35, 0.15, 0.01),
             ("pid_kp", "ABS PID Kp", 0.0, 10.0, 3.0, 0.1),
             ("pid_ki", "ABS PID Ki", 0.0, 200.0, 40.0, 1.0),
-            ("actuator_tau", "Actuator tau (s)", 0.005, 0.15, 0.03, 0.001),
+            # Slider default MUST match BrakeActuator.tau (0.008 s). Previously
+            # this label read 0.03 while the actuator was initialized to 0.008,
+            # so any stray click on the slider silently slowed the brake
+            # modulator by ~4x and kept ABS from dumping pressure -> rear
+            # lockup. Upper bound kept at 0.15 for exploration.
+            ("actuator_tau", "Actuator tau (s)", 0.005, 0.15, 0.008, 0.001),
             ("stab_kp", "ESC PID Kp", 0.0, 3.0, 0.5, 0.05),
             ("driver_v", "Driver target speed (m/s)", 5.0, 60.0, 30.0, 0.5),
         ]

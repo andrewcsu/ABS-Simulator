@@ -74,6 +74,28 @@ def test_abs_release_when_slip_exceeds_upper():
     assert cmd == pytest.approx(abs_c.release_pressure)
 
 
+def test_actuator_dumps_pressure_within_abs_hold_window():
+    # With default rate_max, an actuator commanded from 1.0 -> 0.0 must
+    # fall below 0.05 within the ABS hold_duration (~30 ms). Otherwise
+    # the ABS FSM would re-engage HOLD before the wheel ever unloads,
+    # starving the wheel of the pressure relief that should let it spin
+    # back up during RELEASE.
+    a = BrakeActuator()
+    # Saturate pressure first
+    for _ in range(500):
+        a.update(1.0, 0.001)
+    assert a.pressure > 0.5
+    hold_duration = 0.03
+    dt = 0.0005
+    steps = int(hold_duration / dt)
+    for _ in range(steps):
+        a.update(0.0, dt)
+    assert a.pressure < 0.05, (
+        f"Actuator failed to dump within {hold_duration*1000:.0f} ms "
+        f"(pressure={a.pressure:.3f}); ABS cannot recover."
+    )
+
+
 def test_abs_recovers_and_reapplies():
     abs_c = WheelABS(lambda_opt=0.15, delta=0.03, hold_duration=0.02)
     # Lock phase

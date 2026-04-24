@@ -154,6 +154,31 @@ def test_vehicle_straight_line_braking_load_transfers():
     assert kin[FR].Fz > kin[RR].Fz
 
 
+def test_vehicle_cornering_preserves_total_weight_and_transfers_to_outside():
+    # Steady-state right turn: total Fz must equal m*g and the OUTSIDE
+    # (left) wheels must carry more load than the INSIDE (right) wheels.
+    # This guards the fix that feeds specific forces (Fx/m, Fy/m) into
+    # load_transfer rather than velocity derivatives (dvx/dt, dvy/dt),
+    # which would falsely collapse to zero in steady cornering.
+    v = Vehicle()
+    v.set_pose(0.0, 0.0, 0.0)
+    v.set_speed(15.0)
+    dt = 0.001
+    # Right turn: positive steer under SAE body convention used here.
+    inputs = VehicleInputs(steer=0.08, mu=(0.9,) * 4)
+    # Settle into steady cornering
+    for _ in range(1500):
+        v.step(dt, inputs)
+    kin = v.wheel_kinematics()
+    total_Fz = sum(k.Fz for k in kin)
+    from abs_sim.physics.chassis import ChassisParams, G
+    p = ChassisParams()
+    assert total_Fz == pytest.approx(p.mass * G, rel=5e-3)
+    # Outside (left) wheels should be carrying more than inside (right).
+    assert kin[FL].Fz > kin[FR].Fz
+    assert kin[RL].Fz > kin[RR].Fz
+
+
 def test_vehicle_locks_on_ice_without_abs():
     # With high brake on ice and no ABS controller, wheels should saturate
     # slip towards locked; we check that kappa dips below -0.5 at least once.

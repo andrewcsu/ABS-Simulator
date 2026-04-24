@@ -116,6 +116,20 @@ class Track:
     def total_length(self) -> float:
         return sum(seg.length for seg in self.segments)
 
+    @property
+    def is_closed(self) -> bool:
+        """True if the last segment's endpoint coincides (within ~1 m) with
+        the first segment's start. Used by driver helpers to decide whether
+        lookahead should wrap via `s % L` or clamp at `total_length`.
+        """
+        if not self.segments:
+            return False
+        first = self.segments[0]
+        last = self.segments[-1]
+        dx = last.end_x - first.start_x
+        dy = last.end_y - first.start_y
+        return (dx * dx + dy * dy) < 1.0
+
     def _sample(self) -> None:
         self._samples = []
         s_cum = 0.0

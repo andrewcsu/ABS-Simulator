@@ -46,6 +46,11 @@ class WheelABS:
     hold_duration: float = 0.03       # s, duration of HOLD before re-APPLY
     release_pressure: float = 0.0     # commanded pressure during RELEASE
     pid_authority: float = 0.6        # [0,1]: how much the PID can reduce driver demand
+    hold_ratio: float = 0.6           # held_pressure = last_cmd * hold_ratio.
+                                      # <1 prevents HOLD from re-applying the
+                                      # exact pressure that caused overspin and
+                                      # locking the FSM into a RELEASE<->HOLD
+                                      # limit cycle.
 
     kp: float = 3.0
     ki: float = 40.0
@@ -106,7 +111,12 @@ class WheelABS:
 
         if self.state == ABSState.APPLY:
             if abs_k > upper:
-                self.held_pressure = self.last_cmd
+                # Remember a REDUCED fraction of the pressure that just caused
+                # overspin, not the pressure itself. Otherwise HOLD re-applies
+                # exactly the command that locked the wheel and the FSM
+                # oscillates RELEASE<->HOLD without ever entering controlled
+                # APPLY.
+                self.held_pressure = self.last_cmd * self.hold_ratio
                 self._pid.reset()
                 self._set_state(ABSState.RELEASE)
         elif self.state == ABSState.RELEASE:

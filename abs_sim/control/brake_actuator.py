@@ -15,8 +15,20 @@ from dataclasses import dataclass
 
 @dataclass
 class BrakeActuator:
-    tau: float = 0.03         # s, first-order lag time constant
-    rate_max: float = 12.0    # 1/s, maximum rate of pressure change
+    tau: float = 0.008        # s, first-order lag time constant.
+                              # An ABS-equipped hydraulic modulator responds
+                              # in ~5-10 ms (its dump solenoid is close to
+                              # the caliper). The previous 0.03 s value was
+                              # the time constant of the full pedal->caliper
+                              # path, which dominated both APPLY and RELEASE
+                              # and prevented ABS from ever unloading the
+                              # wheel inside the 30 ms HOLD window.
+    rate_max: float = 60.0    # 1/s, maximum rate of pressure change.
+                              # Must allow a full 1.0->0.0 dump within the
+                              # ABS hold_duration (~30 ms) so RELEASE can
+                              # actually unload pressure before HOLD re-engages.
+                              # 60/s -> ~17 ms linear slope; combined with
+                              # tau=0.008 gives p<0.05 within ~25 ms.
     pressure: float = 0.0     # current actual brake pressure (state)
 
     def update(self, cmd: float, dt: float) -> float:
