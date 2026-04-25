@@ -8,7 +8,14 @@ from pathlib import Path
 import pytest
 
 from abs_sim.track.loader import load_track, load_track_from_dict
-from abs_sim.track.presets import PRESETS, curve_braking_scenario, figure_8, oval, straight_road
+from abs_sim.track.presets import (
+    PRESETS,
+    curve_braking_scenario,
+    figure_8,
+    oval,
+    split_mu_curves,
+    straight_road,
+)
 from abs_sim.track.track import SurfacePatch, Track
 
 
@@ -86,6 +93,74 @@ def test_surface_patch_overrides_segment_surface():
     assert t.surface_at(10.0) == "dry"
     assert t.surface_at(50.0) == "ice"
     assert t.surface_at(80.0) == "dry"
+
+
+def test_segment_roundtrips_left_right_surfaces_through_build():
+    t = Track.build(
+        name="split",
+        specs=[{
+            "type": "straight", "length": 50.0,
+            "surface": "dry",
+            "surface_left": "ice", "surface_right": "dry",
+        }],
+    )
+    seg = t.segments[0]
+    assert seg.surface == "dry"
+    assert seg.surface_left == "ice"
+    assert seg.surface_right == "dry"
+
+
+def test_surface_at_with_e_sign_selects_half_lane():
+    t = Track.build(
+        name="split",
+        specs=[{
+            "type": "straight", "length": 100.0,
+            "surface": "dry",
+            "surface_left": "ice", "surface_right": "dry",
+        }],
+    )
+    # e < 0 is the FL/RL side -> surface_left
+    assert t.surface_at(50.0, e=-1.0) == "ice"
+    # e > 0 is the FR/RR side -> surface_right
+    assert t.surface_at(50.0, e=+1.0) == "dry"
+    # e == 0 falls back to base surface (centerline ambiguous).
+    assert t.surface_at(50.0, e=0.0) == "dry"
+    # Back-compat: zero-arg call still works.
+    assert t.surface_at(50.0) == "dry"
+
+
+def test_surface_patch_half_lane_override():
+    # Base dry + a left-only ice patch in the middle.
+    patches = [SurfacePatch(
+        start_s=20.0, end_s=80.0,
+        surface="dry", surface_left="ice",
+    )]
+    t = Track.build(
+        name="left_ice_patch",
+        specs=[{"type": "straight", "length": 100.0, "surface": "dry"}],
+        surface_patches=patches,
+    )
+    assert t.surface_at(50.0, e=-1.0) == "ice"
+    # Right side inside the patch stays dry because surface_right is None.
+    assert t.surface_at(50.0, e=+1.0) == "dry"
+    # Outside the patch both sides are dry.
+    assert t.surface_at(10.0, e=-1.0) == "dry"
+
+
+def test_split_mu_curves_preset_has_asymmetric_surfaces():
+    t = split_mu_curves()
+    assert t.total_length > 0.0
+    # Every sample should have left=ice, right=dry on the split preset.
+    samples = t.samples()
+    assert any(
+        (p.surface_left == "ice" and p.surface_right == "dry") for p in samples
+    )
+    # At least one arc segment so there's a curve on this track.
+    assert any(seg.type == "arc" for seg in t.segments)
+    # surface_at reflects the split too.
+    s_mid = 0.5 * t.total_length
+    assert t.surface_at(s_mid, e=-1.0) == "ice"
+    assert t.surface_at(s_mid, e=+1.0) == "dry"
 
 
 def test_presets_loadable_and_have_positive_length():

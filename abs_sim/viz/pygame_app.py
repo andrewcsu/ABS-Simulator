@@ -32,7 +32,8 @@ CONTROL_RECT = (940, 460, 540, 420)
 
 
 DEFAULT_TRACK_ORDER = ["oval", "figure_8", "f1_like", "curve_braking",
-                       "straight", "random_surface_straight"]
+                       "straight", "random_surface_straight",
+                       "split_mu_curves"]
 
 
 @dataclass
@@ -83,11 +84,27 @@ class PygameApp:
         self.track_renderer = TrackRenderer(track)
         self.tire_marks = TireMarkBuffer()
 
-        cars = self._build_cars()
+        # Preset-specific cruise hint (e.g. split-mu uses ~16 m/s instead
+        # of the global 30 m/s default; otherwise the driver would brake too
+        # hard on every corner entry and spin on the asymmetric grip).
+        v_cruise_default = (
+            track.recommended_v_cruise
+            if track.recommended_v_cruise is not None
+            else self.options.v_cruise
+        )
+
+        cars = self._build_cars(v_cruise_default)
         for c in cars:
             c.vehicle.set_pose(0.0, 0.0, 0.0)
-            c.vehicle.set_speed(self.options.v_cruise)
+            c.vehicle.set_speed(v_cruise_default)
         self.sim = Simulation(track=track, cars=cars)
+        # Sync the slider to the actual v_cruise being used so what the
+        # user sees in the UI matches the autopilot's target.
+        if hasattr(self, "_sliders") and "driver_v" in self._sliders:
+            self._sliders["driver_v"].set_current_value(v_cruise_default)
+            self._labels["driver_v"].set_text(
+                f"Driver target speed (m/s): {v_cruise_default:.3g}"
+            )
         if self.options.follow_camera:
             self.topdown_cam.fit(track.centerline_points(), padding=40)
         else:
@@ -97,7 +114,9 @@ class PygameApp:
             for c in cars:
                 c.surface_override = self.options.initial_surface_override
 
-    def _build_cars(self) -> List[Car]:
+    def _build_cars(self, v_cruise: Optional[float] = None) -> List[Car]:
+        if v_cruise is None:
+            v_cruise = self.options.v_cruise
         if self.options.show_multi_car and self.options.multi_cars:
             out: List[Car] = []
             for name, drv, col in self.options.multi_cars:
@@ -106,7 +125,7 @@ class PygameApp:
             return out
         car = Car.make_default(
             name="ego",
-            driver=CruisePursuitDriver(v_cruise=self.options.v_cruise),
+            driver=CruisePursuitDriver(v_cruise=v_cruise),
             color=(80, 200, 255),
         )
         return [car]

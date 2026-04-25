@@ -66,6 +66,9 @@ class Car:
     last_stab_out: float = 0.0
     last_mu: Tuple[float, float, float, float] = (0.9, 0.9, 0.9, 0.9)
     last_surface: str = "dry"
+    # Per-wheel surface names (FL, FR, RL, RR). Populated from the track every
+    # controller tick; differs across wheels on split-mu roads.
+    last_surface_per_wheel: Tuple[str, str, str, str] = ("dry", "dry", "dry", "dry")
 
     def reset(self) -> None:
         for a in self.abs_controllers:
@@ -128,13 +131,42 @@ class Simulation:
         return self.track.surface_at(s)
 
     def _mu_for_car(self, car: Car) -> Tuple[float, float, float, float]:
-        """Return (mu_FL, mu_FR, mu_RL, mu_RR). For now, all wheels see the
-        same track surface mu, times the car's mu_multiplier event override."""
-        surface_name = self._surface_under_car(car)
-        mu_base = SURFACES.get(surface_name, SURFACES["dry"]).mu
-        mu = mu_base * car.mu_multiplier
-        car.last_mu = (mu, mu, mu, mu)
-        car.last_surface = surface_name
+        """Return (mu_FL, mu_FR, mu_RL, mu_RR).
+
+        If a surface override is active (via event), force that single surface
+        onto all four wheels so ``set_surface_override`` keeps its old
+        contract. Otherwise query the track at each wheel's world position so
+        split-mu roads (e.g. ice left / dry right) yield different per-wheel
+        mu values. The physics layer already consumes ``inputs.mu[i]`` per
+        wheel in the Dugoff tire call and TCS cap, so this naturally
+        propagates into per-wheel force generation.
+        """
+        if car.surface_override:
+            surface_name = car.surface_override
+            mu_base = SURFACES.get(surface_name, SURFACES["dry"]).mu
+            mu = mu_base * car.mu_multiplier
+            car.last_mu = (mu, mu, mu, mu)
+            car.last_surface = surface_name
+            car.last_surface_per_wheel = (surface_name,) * 4
+            return car.last_mu
+
+        wheel_xy = car.vehicle.wheel_world_positions()
+        # CG surface is used for the HUD's single surface label.
+        s_cg, _ = self.track.closest(car.vehicle.x, car.vehicle.y)
+        cg_surface = self.track.surface_at(s_cg)
+
+        mus: List[float] = []
+        surfaces: List[str] = []
+        for (xw, yw) in wheel_xy:
+            s_i, e_i = self.track.closest(xw, yw, s_hint=s_cg)
+            surf_i = self.track.surface_at(s_i, e_i)
+            mu_i = SURFACES.get(surf_i, SURFACES["dry"]).mu * car.mu_multiplier
+            mus.append(mu_i)
+            surfaces.append(surf_i)
+
+        car.last_mu = (mus[0], mus[1], mus[2], mus[3])
+        car.last_surface = cg_surface
+        car.last_surface_per_wheel = (surfaces[0], surfaces[1], surfaces[2], surfaces[3])
         return car.last_mu
 
     # --------------------------------------------------------------- #

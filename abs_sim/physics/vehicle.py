@@ -336,3 +336,21 @@ class Vehicle:
 
     def static_loads(self) -> Tuple[float, float, float, float]:
         return static_loads(self.chassis)
+
+    def wheel_world_positions(self) -> List[Tuple[float, float]]:
+        """Return world-frame (x, y) for each tire contact, in order FL, FR, RL, RR.
+
+        Applies the same body->world rotation used inside ``_derivatives``
+        (psi CCW from world +x). Used by the simulation layer to look up
+        per-wheel road surface, e.g. on split-mu tracks where the left and
+        right half-lanes differ.
+        """
+        cpsi = math.cos(self.psi)
+        spsi = math.sin(self.psi)
+        x, y = self.x, self.y
+        out: List[Tuple[float, float]] = []
+        for wp in self.wheels:
+            xw = x + cpsi * wp.x_offset - spsi * wp.y_offset
+            yw = y + spsi * wp.x_offset + cpsi * wp.y_offset
+            out.append((xw, yw))
+        return out

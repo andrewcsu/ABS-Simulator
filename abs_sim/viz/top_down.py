@@ -49,30 +49,77 @@ class TrackRenderer:
         self._centerline_points: List[Tuple[float, float]] = [
             (p.x, p.y) for p in track.samples()
         ]
+        # Polyline (world coords) of centerline sections where the left and
+        # right halves of the lane have DIFFERENT surfaces, used to paint a
+        # contrasting boundary marker on top of the ribbon.
+        self._split_centerline: List[List[Tuple[float, float]]] = []
         # Per-sample surface for drawing coloured strips
         self._surface_segments: List[Tuple[str, List[Tuple[float, float]]]] = \
             self._build_surface_strips()
 
+    @staticmethod
+    def _resolve_sides(p) -> Tuple[str, str]:
+        left_surf = p.surface_left if p.surface_left is not None else p.surface
+        right_surf = p.surface_right if p.surface_right is not None else p.surface
+        return left_surf, right_surf
+
     def _build_surface_strips(self) -> List[Tuple[str, List[Tuple[float, float]]]]:
-        """Group consecutive samples by current surface to color surface patches."""
+        """Group consecutive samples by (left_surface, right_surface) pairs.
+
+        When both sides share the same surface a single full-width polygon is
+        emitted (back-compat with uniform tracks and full-width patches).
+        When they differ, two half-width polygons are emitted so the ribbon
+        is painted ice on one half and e.g. dry on the other.
+        """
         samples = self.track.samples()
         if not samples:
             return []
         strips: List[Tuple[str, List[Tuple[float, float]]]] = []
-        current_surface = samples[0].surface
-        left: List[Tuple[float, float]] = []
-        right: List[Tuple[float, float]] = []
+        self._split_centerline = []
+
         half = self.track.width / 2.0
-        for p in samples:
+
+        def edges(p) -> Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]:
+            # Returns (left_edge, center, right_edge) world points.
             nx, ny = -math.sin(p.heading), math.cos(p.heading)
-            left.append((p.x + nx * half, p.y + ny * half))
-            right.append((p.x - nx * half, p.y - ny * half))
-            if p.surface != current_surface:
-                strips.append((current_surface, left + list(reversed(right))))
-                left = [left[-1]]
-                right = [right[-1]]
-                current_surface = p.surface
-        strips.append((current_surface, left + list(reversed(right))))
+            lx, ly = p.x + nx * half, p.y + ny * half
+            cx, cy = p.x, p.y
+            rx, ry = p.x - nx * half, p.y - ny * half
+            return (lx, ly), (cx, cy), (rx, ry)
+
+        def flush(group_samples: List, lsurf: str, rsurf: str) -> None:
+            if not group_samples:
+                return
+            left_edge: List[Tuple[float, float]] = []
+            center_pts: List[Tuple[float, float]] = []
+            right_edge: List[Tuple[float, float]] = []
+            for p in group_samples:
+                le, cp, re_ = edges(p)
+                left_edge.append(le)
+                center_pts.append(cp)
+                right_edge.append(re_)
+            if lsurf == rsurf:
+                strips.append((lsurf, left_edge + list(reversed(right_edge))))
+            else:
+                strips.append((lsurf, left_edge + list(reversed(center_pts))))
+                strips.append((rsurf, center_pts + list(reversed(right_edge))))
+                self._split_centerline.append(list(center_pts))
+
+        current_sides = self._resolve_sides(samples[0])
+        group: List = [samples[0]]
+        for p in samples[1:]:
+            sides = self._resolve_sides(p)
+            if sides != current_sides:
+                # Include p as the closing sample of the outgoing group AND
+                # the opening sample of the next group so adjacent strips
+                # share an edge (no visible seams).
+                group.append(p)
+                flush(group, *current_sides)
+                group = [p]
+                current_sides = sides
+            else:
+                group.append(p)
+        flush(group, *current_sides)
         return strips
 
     def draw_background(self, surf: pygame.Surface, cam: Camera) -> None:
@@ -92,6 +139,7 @@ class TrackRenderer:
                 pts = [cam.world_to_screen(x, y) for x, y in poly]
                 pygame.draw.polygon(surf, _surface_color(surface_name), pts)
             self._draw_centerline(surf, cam)
+            self._draw_split_boundary(surf, cam)
             self._draw_edges(surf, cam)
         finally:
             surf.set_clip(prev_clip)
@@ -107,6 +155,18 @@ class TrackRenderer:
             a = cam.world_to_screen(*pts[i])
             b = cam.world_to_screen(*pts[j])
             pygame.draw.line(surf, color, a, b, 2)
+
+    def _draw_split_boundary(self, surf: pygame.Surface, cam: Camera) -> None:
+        """Overlay a bright solid line on sections where the left and right
+        half-lane surfaces differ, so the split-mu boundary is obvious even
+        when the two colours are similar in brightness.
+        """
+        color = (255, 90, 90)
+        for segment in self._split_centerline:
+            if len(segment) < 2:
+                continue
+            pts = [cam.world_to_screen(x, y) for x, y in segment]
+            pygame.draw.lines(surf, color, False, pts, 3)
 
     def _draw_edges(self, surf: pygame.Surface, cam: Camera) -> None:
         half = self.track.width / 2.0

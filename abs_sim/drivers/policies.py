@@ -9,6 +9,7 @@ import random
 from typing import List, Optional
 
 from abs_sim.control.pid import PID
+from abs_sim.physics.tire import SURFACES
 from abs_sim.track.track import Track
 
 
@@ -86,19 +87,68 @@ def pure_pursuit_steer(
     return math.atan2(2.0 * ctx.wheelbase * math.sin(alpha), max(lookahead, 0.5))
 
 
+def _mu_limit_at(track: Track, s: float, mu_fallback: float) -> float:
+    """Return the conservative mu to plan against at arc length s.
+
+    On a split-mu road the outside-of-turn tires (which carry most load under
+    cornering) can sit on a much lower mu than the driver's nominal assumption.
+    Probing both half-lanes and taking the minimum gives a lateral-grip
+    estimate that's correct whether the surfaces are uniform, full-width
+    patches, or half-lane split. Also caps by the driver's own ``mu_assumed``
+    so drivers who want to stay conservative on unknown tracks still do.
+    """
+    left = SURFACES.get(track.surface_at(s, e=-1.0), SURFACES["dry"]).mu
+    right = SURFACES.get(track.surface_at(s, e=+1.0), SURFACES["dry"]).mu
+    return min(mu_fallback, left, right)
+
+
+def _mu_brake_plan_at(track: Track, s: float, mu_fallback: float) -> float:
+    """Mu to plan BRAKING deceleration against.
+
+    Braking on split-mu produces an asymmetric yaw moment that ESC has to
+    fight -- and that fight spends lateral grip on the outside wheels. If
+    we plan braking by the average mu we'll demand too much brake force in
+    the seconds before a corner, the asymmetric yaw moment fights the
+    steering, and the car spins. We bias TOWARD the worst side: 40% min mu
+    + 60% avg mu, capped at the driver's nominal mu_assumed. On uniform
+    surfaces this collapses to mu_assumed (no behaviour change); on a true
+    ice/dry split it gives mu ~ 0.34 -> a_plan ~ 2.7 m/s^2 so the driver
+    starts braking earlier and applies less peak pedal.
+    """
+    left = SURFACES.get(track.surface_at(s, e=-1.0), SURFACES["dry"]).mu
+    right = SURFACES.get(track.surface_at(s, e=+1.0), SURFACES["dry"]).mu
+    blended = 0.4 * min(left, right) + 0.6 * 0.5 * (left + right)
+    return min(mu_fallback, blended)
+
+
 def curvature_limited_target_speed(
     track: Track,
     s: float,
     v_cruise: float,
     mu_assumed: float,
-    horizon: float = 120.0,
+    horizon: float = 180.0,
     step: float = 5.0,
     margin: float = 0.8,
     a_plan: float = 5.0,
+    settle_buffer: float = 25.0,
 ) -> float:
     """Look ahead on the track and return a speed target that keeps the lateral
     acceleration below mu*g*margin on any upcoming curve, with enough time to
     brake from v_cruise at deceleration a_plan.
+
+    The lateral grip cap uses the MINIMUM mu across both half-lanes, so a
+    split-mu road (e.g. ice left / dry right) forces a low corner-entry
+    speed even though the centerline surface may read as dry. The
+    deceleration cap (used to figure out *when* to start braking ahead of
+    the corner) is biased toward the worst side (40% min + 60% avg), which
+    on split-mu gives a softer pedal application than on uniform dry --
+    this limits the asymmetric yaw moment that ESC has to fight on entry.
+    Finally, ``settle_buffer`` adds a few meters of pre-corner runway: the
+    planner asks for v_curve to be reached BEFORE the corner mouth, so any
+    residual yaw from braking has time to die down before the steering
+    input arrives. This is the single biggest fix for split-mu corner
+    entry: braking and turning at the same time on asymmetric grip is
+    what causes the spin.
     """
     v_target = v_cruise
     d = step
@@ -111,8 +161,12 @@ def curvature_limited_target_speed(
         _, _, _, curv, _ = track.sample(s_ahead)
         if curv != 0.0:
             R = 1.0 / abs(curv)
-            v_curve = math.sqrt(max(mu_assumed * G * R, 0.0)) * margin
-            v_allowed = math.sqrt(max(v_curve * v_curve + 2.0 * a_plan * d, 0.0))
+            mu_lat = _mu_limit_at(track, s_ahead, mu_assumed)
+            mu_long = _mu_brake_plan_at(track, s_ahead, mu_assumed)
+            v_curve = math.sqrt(max(mu_lat * G * R, 0.0)) * margin
+            a_plan_eff = min(a_plan, mu_long * G * margin)
+            d_eff = max(d - settle_buffer, 0.0)
+            v_allowed = math.sqrt(max(v_curve * v_curve + 2.0 * a_plan_eff * d_eff, 0.0))
             if v_allowed < v_target:
                 v_target = v_allowed
         d += step

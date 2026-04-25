@@ -39,7 +39,14 @@ class StabilityController:
     kp: float = 0.5
     ki: float = 0.5
     kd: float = 0.02
-    max_override: float = 0.4       # max |brake delta| added per wheel
+    # max |brake delta| added per wheel. 0.4 was too timid for split-mu
+    # emergency braking: with one side on ice and one on dry asphalt, full
+    # pedal demand produces a big yaw moment (the dry side brakes much
+    # harder), and the controller has to be able to back the high-mu side
+    # off significantly to keep the car straight. 0.8 gives near-full
+    # authority while still leaving headroom; subtle-error interventions
+    # are unaffected because the integrator and gains keep u small there.
+    max_override: float = 0.8
     dead_band: float = 0.05         # rad/s error below which we don't intervene
     understeer_gradient: float = 0.0  # K_us (s^2/m-ish units)
     enabled: bool = True

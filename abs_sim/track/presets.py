@@ -84,6 +84,62 @@ def curve_braking_scenario(
     return Track.build(name="curve_braking", specs=specs, width=12.0)
 
 
+def split_mu_curves(
+    surface_left: str = "ice", surface_right: str = "dry",
+) -> Track:
+    """Mixed straight + curve course with different surfaces per lane half.
+
+    Classic split-mu scenario for ABS/ESC demos: the left wheels ride on one
+    surface (ice by default) while the right wheels ride on another (dry
+    asphalt by default). Alternating left- and right-hand curves let the
+    viewer see ABS cycling asymmetrically (left wheels saturate on ice while
+    right wheels still have grip) and the ESC yaw controller fight the
+    mu-induced yaw moment whenever the driver brakes or accelerates.
+
+    The geometry is intentionally gentle: large radii, < 90 deg arcs, and
+    long straights between corners. Cornering on a split-mu road is hard --
+    on a right-hander the OUTSIDE (left) tires that need to bear the
+    cornering load are on ice, so even a tuned ESC can only do so much. With
+    these dimensions the car has enough margin to stay in the 12 m wide lane
+    while still demonstrating the asymmetric-mu behaviour clearly.
+    """
+    kw = {"surface_left": surface_left, "surface_right": surface_right}
+    specs = [
+        # Long entry straight: lets the user tap the brake here to feel
+        # the asymmetric brake-yaw moment on split-mu.
+        {"type": "straight", "length": 140.0, "surface": surface_right, **kw},
+        # Gentle right opener (R=120, 30 deg). Outside-of-turn = LEFT = ice.
+        {"type": "arc", "radius": 120.0, "angle": math.pi / 6,
+         "direction": "right", "surface": surface_right, **kw},
+        {"type": "straight", "length": 100.0, "surface": surface_right, **kw},
+        # Sharper left (R=70, 60 deg). Outside = RIGHT = dry, easier line.
+        {"type": "arc", "radius": 70.0, "angle": math.pi / 3,
+         "direction": "left", "surface": surface_right, **kw},
+        {"type": "straight", "length": 100.0, "surface": surface_right, **kw},
+        # Tight right (R=50, 75 deg). Outside = LEFT = ice. The sharpest
+        # corner on the course; the autopilot really has to crawl through
+        # it (~5 m/s) because the outside tires are on a frozen pond.
+        {"type": "arc", "radius": 50.0, "angle": math.radians(75.0),
+         "direction": "right", "surface": surface_right, **kw},
+        {"type": "straight", "length": 100.0, "surface": surface_right, **kw},
+        # Medium left back the other way (R=80, 45 deg).
+        {"type": "arc", "radius": 80.0, "angle": math.pi / 4,
+         "direction": "left", "surface": surface_right, **kw},
+        {"type": "straight", "length": 140.0, "surface": surface_right, **kw},
+    ]
+    track = Track.build(name="split_mu_curves", specs=specs, width=12.0)
+    # Cruise at 13 m/s. The autonomous driver needs to be at corner-target
+    # speed (~9 m/s on ice-outside corners) BEFORE turning -- braking and
+    # turning at the same time on split-mu produces an unbalanced yaw
+    # moment that ESC can't fully suppress. Cruising at 13 means the
+    # required brake delta is small (13 -> 9 m/s) and the car can settle
+    # well before each corner. Pro instructors give the same advice on
+    # real split-mu skid pads: treat it like a low-grip course top to
+    # bottom, not a dry road that has one slow corner. The slider can
+    # still raise this if the user wants to push it harder.
+    return track.with_recommended_cruise(13.0)
+
+
 def random_surface_straight(length: float = 400.0, seed: int = 0) -> Track:
     """Long straight with randomly-placed low-mu patches for ABS demos."""
     import random
@@ -111,6 +167,7 @@ PRESETS: Dict[str, callable] = {
     "f1_like": f1_like,
     "curve_braking": curve_braking_scenario,
     "random_surface_straight": random_surface_straight,
+    "split_mu_curves": split_mu_curves,
 }
 
 

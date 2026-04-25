@@ -10,7 +10,14 @@ from abs_sim.drivers.policies import CruisePursuitDriver, CurveBrakeDelayDriver
 from abs_sim.sim.events import force_brake, set_surface_override
 from abs_sim.sim.simulation import Car, Simulation
 from abs_sim.sim.telemetry import TelemetryLogger
-from abs_sim.track.presets import curve_braking_scenario, f1_like, straight_road
+from abs_sim.physics.tire import SURFACES
+from abs_sim.track.presets import (
+    curve_braking_scenario,
+    f1_like,
+    split_mu_curves,
+    straight_road,
+)
+from abs_sim.track.track import Track
 
 
 def _run_straight_braking(use_abs: bool, mu_name: str = "snow", v0: float = 20.0):
@@ -125,6 +132,162 @@ def test_f1_like_car_clears_first_corner_without_spinning():
     assert abs(psi - (-math.pi / 2.0)) < math.radians(45.0), (
         f"car heading after first corner = {math.degrees(psi):.1f} deg; expected near -90"
     )
+
+
+def test_split_mu_track_yields_different_per_wheel_mu():
+    """Split-mu roads: left wheels ice, right wheels dry asphalt.
+
+    On the split_mu_curves preset the per-wheel mu lookup must see different
+    surfaces for FL/RL vs FR/RR. We run a single controller tick with the
+    car centered on the first straight and verify that
+        - the left-wheel mus match SURFACES["ice"].mu
+        - the right-wheel mus match SURFACES["dry"].mu
+        - the per-wheel surface names are populated asymmetrically.
+    """
+    track = split_mu_curves()
+    car = Car.make_default(name="ego", driver=CruisePursuitDriver(v_cruise=10.0))
+    # Place the car well inside the first straight, centered, facing +x.
+    car.vehicle.set_pose(60.0, 0.0, 0.0)
+    car.vehicle.set_speed(10.0)
+    sim = Simulation(track=track, cars=[car], telemetry=TelemetryLogger(in_memory=True))
+    # Step past at least one controller tick so _mu_for_car populates last_mu.
+    for _ in range(20):
+        sim.step()
+
+    mu_ice = SURFACES["ice"].mu
+    mu_dry = SURFACES["dry"].mu
+    assert car.last_mu[0] == pytest.approx(mu_ice)  # FL
+    assert car.last_mu[2] == pytest.approx(mu_ice)  # RL
+    assert car.last_mu[1] == pytest.approx(mu_dry)  # FR
+    assert car.last_mu[3] == pytest.approx(mu_dry)  # RR
+    assert car.last_mu[0] < car.last_mu[1]
+    assert car.last_mu[2] < car.last_mu[3]
+    assert car.last_surface_per_wheel[0] == "ice"
+    assert car.last_surface_per_wheel[1] == "dry"
+    assert car.last_surface_per_wheel[2] == "ice"
+    assert car.last_surface_per_wheel[3] == "dry"
+
+
+def test_split_mu_curves_keeps_car_on_track_through_every_corner():
+    """Regression: on the split_mu_curves preset the autopilot has to make
+    it through all three corners without sliding off the lane.
+
+    Previously the driver assumed mu=0.8 across the lane and entered
+    corners hot enough that the asymmetric ice/dry brake yaw moment
+    overwhelmed ESC, sending the car off the outside of every curve. The
+    fix is twofold: the planner now probes per-half-lane mu (taking the
+    minimum for lateral grip and a worst-side-biased blend for the
+    longitudinal brake plan) and adds a ``settle_buffer`` so braking is
+    finished before the corner mouth, and the preset advertises a
+    sensible ``recommended_v_cruise`` (slow enough that the brake delta
+    never demands aggressive pedal). This test locks both behaviours in.
+    """
+    track = split_mu_curves()
+    assert track.recommended_v_cruise is not None
+    car = Car.make_default(
+        name="ego",
+        driver=CruisePursuitDriver(v_cruise=track.recommended_v_cruise),
+    )
+    car.vehicle.set_pose(0.0, 0.0, 0.0)
+    car.vehicle.set_speed(track.recommended_v_cruise)
+    sim = Simulation(track=track, cars=[car], telemetry=TelemetryLogger(in_memory=True))
+
+    half_w = track.width / 2.0
+    last_s = 0.0
+    max_off = 0.0
+    off_count = 0
+    # The track is ~840 m and the autopilot crawls through the sharp corners
+    # at ~5 m/s on the ice-side outsides, so it needs 100+ s of sim time
+    # to reach the end. Give it 130 s of headroom.
+    while sim.time < 130.0:
+        sim.step()
+        s, e = track.closest(car.vehicle.x, car.vehicle.y, s_hint=last_s)
+        last_s = s
+        if abs(e) > max_off:
+            max_off = abs(e)
+        if abs(e) > half_w:
+            off_count += 1
+        # Bail out early if we've already cleared every corner.
+        if s > track.total_length - 5.0:
+            break
+
+    assert max_off <= half_w + 0.5, (
+        f"car drifted to |e|={max_off:.2f} (lane half {half_w:.2f}); "
+        "still sliding off split-mu corners"
+    )
+    assert off_count == 0, f"car was outside the lane for {off_count} steps"
+    assert last_s > track.total_length - 50.0, (
+        f"car stalled at s={last_s:.1f} of {track.total_length:.1f} -- it "
+        "didn't make it through every corner"
+    )
+
+
+def test_split_mu_emergency_brake_keeps_car_on_track():
+    """Slamming the brake at full pedal on a split-mu road must NOT
+    fishtail the car off the lane.
+
+    Real-world physics: the dry-side wheels can decelerate hard while the
+    ice-side wheels saturate the moment ABS lets them, producing a strong
+    yaw moment toward the high-mu side. ESC has to bias the brake away
+    from the dry side hard enough to keep the car straight. With the old
+    ``max_override = 0.4`` the controller couldn't take enough pedal off
+    the dry side and the car slid off; we now require ``max_override``
+    large enough to handle full-pedal split-mu input.
+    """
+    track = split_mu_curves()
+    v0 = 13.0
+    car = Car.make_default(name="ego", driver=CruisePursuitDriver(v_cruise=v0))
+    car.vehicle.set_pose(20.0, 0.0, 0.0)
+    car.vehicle.set_speed(v0)
+    sim = Simulation(track=track, cars=[car], telemetry=TelemetryLogger(in_memory=True))
+    # Cruise for half a second, then slam the pedal for 2 s.
+    sim.schedule(0.5, force_brake(1.0, duration=2.0), desc="ebrake")
+
+    half_w = track.width / 2.0
+    last_s = 20.0
+    max_off = 0.0
+    off_count = 0
+    max_r = 0.0
+    while sim.time < 5.0:
+        sim.step()
+        s, e = track.closest(car.vehicle.x, car.vehicle.y, s_hint=last_s)
+        last_s = s
+        max_off = max(max_off, abs(e))
+        max_r = max(max_r, abs(car.vehicle.r))
+        if abs(e) > half_w:
+            off_count += 1
+
+    assert off_count == 0, (
+        f"car was off the lane for {off_count} steps under emergency brake "
+        f"on split-mu (max |e|={max_off:.2f}, half-width {half_w:.2f})"
+    )
+    assert max_off <= half_w, (
+        f"max |e|={max_off:.2f} reached the lane edge ({half_w:.2f})"
+    )
+    # Yaw should peak well below a full-on spin (which would be > 2 rad/s).
+    assert max_r < 1.5, (
+        f"max |yaw rate|={max_r:.2f} rad/s -- ESC isn't catching the "
+        "split-mu brake yaw moment fast enough"
+    )
+
+
+def test_split_mu_surface_override_still_forces_uniform_mu():
+    """The legacy set_surface_override event must still clamp all four wheels
+    to one surface, regardless of the underlying split-mu track."""
+    track = split_mu_curves()
+    car = Car.make_default(name="ego", driver=CruisePursuitDriver(v_cruise=10.0))
+    car.surface_override = "snow"
+    car.vehicle.set_pose(60.0, 0.0, 0.0)
+    car.vehicle.set_speed(10.0)
+    sim = Simulation(track=track, cars=[car], telemetry=TelemetryLogger(in_memory=True))
+    for _ in range(20):
+        sim.step()
+
+    mu_snow = SURFACES["snow"].mu
+    for m in car.last_mu:
+        assert m == pytest.approx(mu_snow)
+    assert car.last_surface == "snow"
+    assert set(car.last_surface_per_wheel) == {"snow"}
 
 
 def test_curve_braking_three_drivers_each_run():

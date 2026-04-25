@@ -53,6 +53,9 @@ class WheelPanelRenderer:
         kin = car.vehicle.wheel_kinematics()
         states = car.last_abs_states
         pressures = car.last_actuator_pressure
+        per_wheel_surf = getattr(
+            car, "last_surface_per_wheel", (car.last_surface,) * 4,
+        )
 
         cell_w = self.w // 2
         cell_h = self.h // 2
@@ -74,7 +77,7 @@ class WheelPanelRenderer:
                 mu=car.last_mu[i],
                 state=states[i],
                 pressure=pressures[i],
-                surface_name=car.last_surface,
+                surface_name=per_wheel_surf[i],
                 dt_real=dt_real,
                 index=i,
             )
