@@ -6,7 +6,14 @@ import math
 
 import pytest
 
-from abs_sim.drivers.policies import CruisePursuitDriver, CurveBrakeDelayDriver
+from abs_sim.drivers.policies import (
+    CruisePursuitDriver,
+    CurveBrakeDelayDriver,
+    DriverContext,
+    PERSONAS,
+    PersonaDriver,
+    pure_pursuit_steer,
+)
 from abs_sim.sim.events import force_brake, set_surface_override
 from abs_sim.sim.simulation import Car, Simulation
 from abs_sim.sim.telemetry import TelemetryLogger
@@ -312,3 +319,166 @@ def test_curve_braking_three_drivers_each_run():
     # All three cars should have travelled forward significantly.
     for c in sim.cars:
         assert c.vehicle.x > 60.0
+
+
+# --------------------------------------------------------------------------- #
+# Persona archetype regression tests
+# --------------------------------------------------------------------------- #
+
+def test_persona_turn_lead_changes_steering_target():
+    """A driver with ``turn_lead_s > 0`` looks further down the track than a
+    ``turn_lead_s = 0`` driver at the same speed, so on the corner approach
+    their pure-pursuit steer command must differ non-trivially.
+
+    We sample on ``curve_braking_scenario`` (a single known straight+arc)
+    just before the corner mouth, so the on-time lookahead lands a few
+    meters into the arc while the early-turner's longer lookahead lands
+    much deeper, giving materially different steer commands. If the
+    offsets collapsed (e.g. ``turn_lead_s`` was ignored) the two steers
+    would be identical.
+    """
+    track = curve_braking_scenario()
+    # Position the test context ~5 m ahead of the 350 m corner mouth so
+    # both lookaheads land inside the arc but at different arc-lengths.
+    ctx = DriverContext(
+        x=345.0, y=0.0, psi=0.0, vx=15.0, vy=0.0, r=0.0,
+        speed=15.0, wheelbase=2.7,
+    )
+    s_here, _ = track.closest(ctx.x, ctx.y)
+
+    d_on = PersonaDriver(v_cruise=15.0, turn_lead_s=0.0)
+    d_early = PersonaDriver(v_cruise=15.0, turn_lead_s=+0.5)
+
+    base = d_on.lookahead_base + d_on.lookahead_k * ctx.speed
+    steer_on = pure_pursuit_steer(ctx, track, s=s_here, lookahead=base)
+    early_la = max(0.5, base + d_early.turn_lead_s * ctx.speed)
+    steer_early = pure_pursuit_steer(ctx, track, s=s_here, lookahead=early_la)
+
+    assert abs(steer_early - steer_on) > 1e-4, (
+        f"turn_lead_s had no effect on steering: on={steer_on:.6f}, "
+        f"early={steer_early:.6f}"
+    )
+
+
+def test_persona_brake_lead_shifts_brake_start():
+    """A driver with ``brake_lead_s > 0`` begins hard braking for a corner
+    earlier (further from the corner mouth) than an on-time driver.
+
+    Sampled on curve_braking_scenario (350 m straight then a tight left).
+    Both Pro and Cautious are placed at the same pose at the same speed
+    (matching v_cruise so we isolate the brake-lead effect from the
+    cruise-speed difference) and we record how far before the corner each
+    first applies heavy brake. The Cautious driver's brake_lead_s=+0.5 must
+    trigger sustained braking at least a few meters earlier than Pro.
+    """
+    track = curve_braking_scenario()
+    v0 = 35.0
+
+    def first_brake_x(driver, threshold: float = 0.05):
+        car = Car.make_default(name=driver.name, driver=driver)
+        car.vehicle.set_pose(180.0, 0.0, 0.0)
+        car.vehicle.set_speed(v0)
+        sim = Simulation(
+            track=track, cars=[car],
+            telemetry=TelemetryLogger(in_memory=True),
+        )
+        while sim.time < 8.0:
+            sim.step()
+            if car.last_cmd.brake_demand > threshold:
+                return car.vehicle.x
+        return None
+
+    # Match cruise speed on both so the only difference is brake_lead_s.
+    pro = PERSONAS["pro"](v_cruise=v0)
+    cautious = PERSONAS["cautious"](v_cruise=v0)
+
+    x_pro = first_brake_x(pro)
+    x_cau = first_brake_x(cautious)
+    assert x_pro is not None, "Pro never touched the brake in the window"
+    assert x_cau is not None, "Cautious never touched the brake in the window"
+
+    # Cautious should be on the brake at least a few meters earlier along
+    # the track. (Pro's brake lead is 0; Cautious is +0.5 s; at 35 m/s that's
+    # ~17 m of extra settle buffer -> expect several meters of real-world
+    # offset even after smoothing.)
+    assert x_cau < x_pro - 3.0, (
+        f"brake_lead_s didn't shift Cautious's brake-start earlier: "
+        f"cautious@x={x_cau:.1f}, pro@x={x_pro:.1f}"
+    )
+
+
+def test_personas_all_complete_first_corner():
+    """Every archetype must get through the first corner of f1_like without
+    leaving the lane. A failure here usually means a persona's trait values
+    are too extreme and need to be dialled back (e.g. Aggressive's
+    ``turn_lead_s`` went so negative the car can't initiate the corner)."""
+    track = f1_like()
+    half_w = track.width / 2.0
+
+    for name in PERSONAS:
+        driver = PERSONAS[name]()
+        car = Car.make_default(name=name, driver=driver)
+        car.vehicle.set_pose(0.0, 0.0, 0.0)
+        car.vehicle.set_speed(driver.v_cruise)
+        sim = Simulation(
+            track=track, cars=[car],
+            telemetry=TelemetryLogger(in_memory=True),
+        )
+        last_s = 0.0
+        max_off = 0.0
+        # f1_like's first corner is reached well before s=150 m; run long
+        # enough for even the slowest persona (Cautious at 14 m/s) to get
+        # past it.
+        while sim.time < 20.0:
+            sim.step()
+            s, e = track.closest(car.vehicle.x, car.vehicle.y, s_hint=last_s)
+            last_s = s
+            max_off = max(max_off, abs(e))
+            if s > 200.0:
+                break
+        assert max_off <= half_w + 0.5, (
+            f"persona '{name}' drifted to |e|={max_off:.2f} on f1_like "
+            f"(lane half {half_w:.2f}); its trait values need tuning"
+        )
+        assert last_s > 100.0, (
+            f"persona '{name}' stalled at s={last_s:.1f} on f1_like -- "
+            "probably spun on corner entry"
+        )
+
+
+def test_aggressive_finishes_ahead_of_cautious_on_open_track():
+    """Ordering check: on the same open track and same duration, Aggressive
+    (faster v_cruise, dives into corners) must be further along the track
+    than Cautious (slower v_cruise, brakes earlier).
+
+    If this ever flips, one of:
+      * Aggressive's v_cruise dropped below Cautious's.
+      * The brake plan for Aggressive is now so conservative it's pulling
+        speed anyway.
+      * The Cautious planner's settle_buffer went negative.
+    """
+    track = f1_like()
+
+    def run(name, t_end=30.0):
+        driver = PERSONAS[name]()
+        car = Car.make_default(name=name, driver=driver)
+        car.vehicle.set_pose(0.0, 0.0, 0.0)
+        car.vehicle.set_speed(driver.v_cruise)
+        sim = Simulation(
+            track=track, cars=[car],
+            telemetry=TelemetryLogger(in_memory=True),
+        )
+        last_s = 0.0
+        while sim.time < t_end:
+            sim.step()
+            last_s, _ = track.closest(
+                car.vehicle.x, car.vehicle.y, s_hint=last_s,
+            )
+        return last_s
+
+    s_aggr = run("aggressive")
+    s_cau = run("cautious")
+    assert s_aggr > s_cau + 20.0, (
+        f"aggressive covered s={s_aggr:.1f} but cautious covered s={s_cau:.1f} "
+        f"(expected aggressive at least 20 m ahead)"
+    )

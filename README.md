@@ -62,6 +62,7 @@ python scripts/run_interactive.py                 # default f1_like track
 python scripts/run_interactive.py --track oval
 python scripts/run_interactive.py --track curve_braking --cruise 35
 python scripts/run_interactive.py --track straight --surface ice
+python scripts/run_interactive.py --track split_mu_curves
 ```
 
 ### Keyboard controls
@@ -75,6 +76,7 @@ python scripts/run_interactive.py --track straight --surface ice
 | `T`     | Cycle to the next track preset                             |
 | `R`     | Reset the current track                                    |
 | `F`     | Toggle camera follow vs fit-track                          |
+| `P`     | Cycle the ego car through the driver persona archetypes    |
 
 ### Sliders (right-hand panel)
 
@@ -96,12 +98,52 @@ python scripts/run_three_driver_demo.py --cruise 40 --corner 14 --surface wet --
 
 # Random road-surface patches + random full-stop brake events.
 python scripts/run_random_surface_demo.py --seed 7
+
+# Four driver-persona archetypes (Pro / Cautious / Novice / Aggressive)
+# on the same track; produces per-persona telemetry + a comparison plot.
+python scripts/run_persona_comparison.py --track f1_like
+python scripts/run_persona_comparison.py --track split_mu_curves --only pro,cautious
 ```
 
 Outputs go under `runs/` by default (configurable with `--out`). Each run
 drops a CSV of all telemetry (per-wheel kappa, alpha, Fz, forces, omega, brake
 command and actual pressure, ABS state letters, chassis accelerations, etc.)
 and matplotlib comparison figures.
+
+## Driver personas
+
+`PersonaDriver` extends the cruise driver with two independent timing
+offsets — `turn_lead_s` for steering and `brake_lead_s` for braking — so
+the same track exercises materially different driving styles. Four named
+archetypes ship in [`abs_sim/drivers/policies.py`](abs_sim/drivers/policies.py)
+via the `PERSONAS` factory registry:
+
+| Archetype  | `turn_lead_s` | `brake_lead_s` | `v_cruise` | `mu_assumed` | Character                                                   |
+|------------|---------------|----------------|------------|--------------|-------------------------------------------------------------|
+| Pro        | 0.0           | 0.0            | 18         | 0.85         | Clean, on-time; uses the track's actual grip accurately.    |
+| Cautious   | +0.4 (early)  | +0.5 (early)   | 14         | 0.70         | Anticipates everything, slower cruise, lots of margin.      |
+| Novice     | -0.3 (late)   | -0.4 (late)    | 18         | 0.90         | Reactive turn-in, brakes late, slightly overconfident.      |
+| Aggressive | -0.2 (late)   | -0.6 (late)    | 22         | 0.95         | Fast cruise, trail-brakes deep, leaves no margin.           |
+
+`turn_lead_s` shifts pure-pursuit lookahead by `turn_lead_s * speed`
+meters (positive = looks further ahead = TURNS EARLY). `brake_lead_s`
+adds `brake_lead_s * v_cruise` meters to the planner's `settle_buffer`
+(positive = bigger pre-corner runway = BRAKES EARLY). The other two
+traits — `v_cruise` and `mu_assumed` — round out each archetype's
+character.
+
+Exposed two ways:
+
+- **Interactive:** Press `P` in the pygame app to cycle the ego car
+  through Pro → Cautious → Novice → Aggressive → Pro. The HUD prints a
+  one-line indicator showing the active persona and its trait values.
+  The slider `v_cruise` is preserved across the cycle so only the
+  timing/mu changes.
+- **Offline:** `python scripts/run_persona_comparison.py` runs every
+  persona on the same track, dumps per-persona CSVs, and renders a
+  side-by-side comparison plot (speed vs. time, pedal vs. time, XY
+  trajectory). Use `--only pro,aggressive` to pick a subset and
+  `--track split_mu_curves` to compare on low-grip asphalt.
 
 ## Tests
 
@@ -142,8 +184,9 @@ smoke tests.
 - [`abs_sim/track/loader.py`](abs_sim/track/loader.py) — YAML loader; see
   `abs_sim/config/tracks/*.yaml`.
 - [`abs_sim/drivers/policies.py`](abs_sim/drivers/policies.py) — `Driver`
-  base class plus `CruisePursuitDriver`, `CurveBrakeDelayDriver`, and
-  `RandomBrakeEventDriver`.
+  base class plus `CruisePursuitDriver`, `CurveBrakeDelayDriver`,
+  `RandomBrakeEventDriver`, and `PersonaDriver` (Pro / Cautious / Novice
+  / Aggressive archetypes registered in `PERSONAS`).
 - [`abs_sim/sim/simulation.py`](abs_sim/sim/simulation.py) — multi-car
   orchestrator with multi-rate scheduling (1 ms physics, 5 ms control, 60 Hz
   render) and telemetry logging.

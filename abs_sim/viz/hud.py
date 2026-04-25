@@ -70,6 +70,7 @@ class HUDRenderer:
             "A: toggle ABS   E: toggle ESC",
             "1-5: dry/wet/snow/ice/sand",
             "T: cycle tracks   R: reset",
+            "P: cycle driver persona",
         ]
         ry = self.y + pad
         for l in help_text:

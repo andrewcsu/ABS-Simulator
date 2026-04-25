@@ -11,7 +11,7 @@ import sys
 import pygame
 import pygame_gui
 
-from abs_sim.drivers.policies import CruisePursuitDriver, Driver
+from abs_sim.drivers.policies import CruisePursuitDriver, Driver, PERSONAS
 from abs_sim.physics.tire import SURFACES
 from abs_sim.sim.events import force_brake, set_surface_override
 from abs_sim.sim.simulation import Car, Simulation
@@ -72,6 +72,11 @@ class PygameApp:
             viewport_x=TOPDOWN_RECT[0], viewport_y=TOPDOWN_RECT[1],
         )
         self._extra_lines: List[str] = []
+        # Persona cycling starts "off" (-1) so the default cars loaded by
+        # _load_track keep their stock CruisePursuitDriver; the user opts
+        # into persona mode by pressing P, at which point we wrap the ego
+        # car in one of the archetypes and start cycling.
+        self._persona_idx: int = -1
 
         self._build_ui()
         self._load_track(self._track_order[self._track_idx])
@@ -98,6 +103,9 @@ class PygameApp:
             c.vehicle.set_pose(0.0, 0.0, 0.0)
             c.vehicle.set_speed(v_cruise_default)
         self.sim = Simulation(track=track, cars=cars)
+        # Any previous persona selection is invalidated by the fresh cars;
+        # reset the cycle so the next 'P' press starts at the first archetype.
+        self._persona_idx = -1
         # Sync the slider to the actual v_cruise being used so what the
         # user sees in the UI matches the autopilot's target.
         if hasattr(self, "_sliders") and "driver_v" in self._sliders:
@@ -197,6 +205,35 @@ class PygameApp:
         self._load_track(self._track_order[self._track_idx])
         self._extra_lines = [f"Track: {self._track_order[self._track_idx]}"]
 
+    def _cycle_persona(self, delta: int = 1) -> None:
+        """Swap the ego car's driver to the next persona in ``PERSONAS``.
+
+        Preserves the user's current cruise-speed setting so cycling doesn't
+        reset the slider. The HUD gains a one-line indicator (rendered via
+        ``_extra_lines``) showing which archetype is active.
+        """
+        assert self.sim is not None
+        if not self.sim.cars:
+            return
+        car = self.sim.cars[0]
+        current_v = getattr(car.driver, "v_cruise", self.options.v_cruise)
+
+        names = list(PERSONAS.keys())
+        self._persona_idx = (self._persona_idx + delta) % len(names)
+        name = names[self._persona_idx]
+        # Use the user's current slider value so cycling is a pure "change
+        # style, keep my pace" toggle rather than snapping back to each
+        # persona's default cruise (which would surprise the user mid-lap).
+        new_driver = PERSONAS[name](v_cruise=current_v)
+        new_driver.reset()
+        car.driver = new_driver
+        self._extra_lines = [
+            f"Persona: {name} "
+            f"(turn_lead={new_driver.turn_lead_s:+.2f}s, "
+            f"brake_lead={new_driver.brake_lead_s:+.2f}s, "
+            f"mu={new_driver.mu_assumed:.2f})"
+        ]
+
     def _handle_key(self, key: int) -> None:
         assert self.sim is not None
         car = self.sim.cars[0]
@@ -217,6 +254,8 @@ class PygameApp:
             self._extra_lines = [f"ESC -> {'ON' if car.stability_enabled else 'OFF'}"]
         elif key == pygame.K_t:
             self._cycle_track(+1)
+        elif key == pygame.K_p:
+            self._cycle_persona(+1)
         elif key == pygame.K_r:
             self._load_track(self._track_order[self._track_idx])
             self._extra_lines = ["reset"]

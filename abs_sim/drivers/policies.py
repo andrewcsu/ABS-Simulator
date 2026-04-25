@@ -1,4 +1,6 @@
-"""Driver policies: cruise pursuit, random brake events, and curve-braking delay."""
+"""Driver policies: cruise pursuit, random brake events, curve-braking delay,
+and named persona archetypes (Pro / Cautious / Novice / Aggressive) that
+combine turn-timing and brake-timing offsets on top of the cruise driver."""
 
 from __future__ import annotations
 
@@ -6,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import math
 import random
-from typing import List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from abs_sim.control.pid import PID
 from abs_sim.physics.tire import SURFACES
@@ -365,3 +367,163 @@ class RandomBrakeEventDriver(CruisePursuitDriver):
         if s < self._active_until:
             return DriverCommand(throttle=0.0, brake_demand=1.0, steer=cmd.steer)
         return cmd
+
+
+# --------------------------------------------------------------------------- #
+# Persona driver: configurable turn-timing and brake-timing on top of Cruise
+# --------------------------------------------------------------------------- #
+
+# Default settle buffer used by the base Cruise driver (matches the default
+# in ``curvature_limited_target_speed``). Centralizing it here lets the
+# persona subclass shift it per-driver without hard-coding the magic number
+# in multiple places.
+_DEFAULT_SETTLE_BUFFER: float = 25.0
+
+
+@dataclass
+class PersonaDriver(CruisePursuitDriver):
+    """Cruise + pure-pursuit driver with independent turn- and brake-timing
+    offsets, used to model driving-style archetypes (Pro, Cautious, Novice,
+    Aggressive).
+
+    Both offsets are expressed in SECONDS so that tuning is roughly
+    speed-independent: a ``turn_lead_s`` of +0.4 shifts the pure-pursuit
+    steering target ``0.4 * speed`` meters further down the road at any
+    speed. Positive values mean the driver ANTICIPATES (turns/brakes
+    early); negative values mean the driver REACTS (turns/brakes late).
+
+    * ``turn_lead_s``: adds ``turn_lead_s * speed`` meters to the pure-
+      pursuit lookahead distance. A positive value makes the driver pick
+      a steering target further ahead, so they steer before the geometric
+      corner mouth (an over-prepared driver). A negative value shrinks the
+      lookahead, so the steering target lags the vehicle -- steer input
+      only appears once the car is already in the corner.
+    * ``brake_lead_s``: adds ``brake_lead_s * v_cruise`` meters to the
+      planner's ``settle_buffer``. Positive = brakes earlier (the planner
+      aims to reach v_curve well BEFORE the corner mouth); negative = the
+      driver dives in hot.
+
+    The rest of the behaviour (PI velocity control, pedal slew limits, per-
+    half-lane mu probing, etc.) is inherited unchanged from
+    :class:`CruisePursuitDriver`.
+    """
+
+    turn_lead_s: float = 0.0   # seconds; + early / - late
+    brake_lead_s: float = 0.0  # seconds; + early / - late
+    name: str = "persona"
+
+    def _target_speed(self, track: Track, s: float) -> float:
+        eff_settle = max(0.0, _DEFAULT_SETTLE_BUFFER + self.brake_lead_s * self.v_cruise)
+        return curvature_limited_target_speed(
+            track, s, self.v_cruise, self.mu_assumed, settle_buffer=eff_settle,
+        )
+
+    def update(self, ctx: DriverContext, track: Track, dt: float) -> DriverCommand:
+        s, _ = track.closest(ctx.x, ctx.y, s_hint=self._last_s)
+        self._last_s = s
+
+        base_lookahead = self.lookahead_base + self.lookahead_k * ctx.speed
+        # Positive turn_lead_s -> larger lookahead -> steer target sampled
+        # further down the track -> driver turns EARLIER. Clamp to a small
+        # positive floor so pure_pursuit_steer's sin/distance math stays
+        # well-defined if someone picks a wildly negative value at low speed.
+        lookahead = max(0.5, base_lookahead + self.turn_lead_s * ctx.speed)
+        steer = pure_pursuit_steer(ctx, track, s, lookahead)
+
+        v_target = self._target_speed(track, s)
+        err = v_target - ctx.speed
+        u = self._pid_v.update(err, dt)
+        if u > 0.0:
+            throttle_target = min(u, 1.0)
+            brake_target = 0.0
+        else:
+            throttle_target = 0.0
+            brake_target = min(-u, 1.0)
+
+        throttle = self._slew(self._last_throttle, throttle_target, self.throttle_rate, dt)
+        brake = self._slew(self._last_brake, brake_target, self.brake_rate, dt)
+        self._last_throttle = throttle
+        self._last_brake = brake
+        return DriverCommand(throttle=throttle, brake_demand=brake, steer=steer)
+
+
+# --------------------------------------------------------------------------- #
+# Persona factory registry
+# --------------------------------------------------------------------------- #
+
+# RGB colors matched to each archetype's character: cyan = calm/expert,
+# blue = deliberate, yellow = uncertain, red = fast/risky. Exposed so the
+# CLI demo and the pygame HUD can paint each persona consistently.
+PERSONA_COLORS: Dict[str, Tuple[int, int, int]] = {
+    "pro":        ( 80, 220, 230),
+    "cautious":   ( 80, 140, 255),
+    "novice":     (245, 220,  80),
+    "aggressive": (230,  80,  80),
+}
+
+
+def _make_pro(v_cruise: Optional[float] = None) -> PersonaDriver:
+    """Clean, on-time baseline: same timing as the existing Cruise driver,
+    with a slightly optimistic mu assumption (an experienced driver knows
+    how much grip the road actually has)."""
+    return PersonaDriver(
+        v_cruise=18.0 if v_cruise is None else v_cruise,
+        mu_assumed=0.85,
+        turn_lead_s=0.0,
+        brake_lead_s=0.0,
+        name="pro",
+        color=PERSONA_COLORS["pro"],
+    )
+
+
+def _make_cautious(v_cruise: Optional[float] = None) -> PersonaDriver:
+    """Over-prepared: anticipates both steering and braking, cruises slower,
+    and assumes less grip than is really available. Clean lines but losing
+    time to the Pro on every straight."""
+    return PersonaDriver(
+        v_cruise=14.0 if v_cruise is None else v_cruise,
+        mu_assumed=0.70,
+        turn_lead_s=+0.4,
+        brake_lead_s=+0.5,
+        name="cautious",
+        color=PERSONA_COLORS["cautious"],
+    )
+
+
+def _make_novice(v_cruise: Optional[float] = None) -> PersonaDriver:
+    """Reactive, slightly overconfident: turns and brakes late because they
+    aren't anticipating the corner, and assumes more grip than is really
+    there. Expect a lot of understeer on tight corners."""
+    return PersonaDriver(
+        v_cruise=18.0 if v_cruise is None else v_cruise,
+        mu_assumed=0.90,
+        turn_lead_s=-0.3,
+        brake_lead_s=-0.4,
+        name="novice",
+        color=PERSONA_COLORS["novice"],
+    )
+
+
+def _make_aggressive(v_cruise: Optional[float] = None) -> PersonaDriver:
+    """Fast and late: cruises high, trail-brakes deep into corners, and
+    assumes near-maximum grip. Quickest on open track but leaves no margin
+    for mistakes or surface changes."""
+    return PersonaDriver(
+        v_cruise=22.0 if v_cruise is None else v_cruise,
+        mu_assumed=0.95,
+        turn_lead_s=-0.2,
+        brake_lead_s=-0.6,
+        name="aggressive",
+        color=PERSONA_COLORS["aggressive"],
+    )
+
+
+# Public registry. Order is meaningful for the pygame 'P'-key cycle: Pro
+# first (the baseline the user sees by default), then the two anticipating
+# and reacting variants, then Aggressive last as the "push it" option.
+PERSONAS: Dict[str, Callable[..., PersonaDriver]] = {
+    "pro":        _make_pro,
+    "cautious":   _make_cautious,
+    "novice":     _make_novice,
+    "aggressive": _make_aggressive,
+}

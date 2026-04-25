@@ -136,6 +136,64 @@ def plot_three_driver_comparison(
     plt.close(fig)
 
 
+def plot_persona_comparison(
+    dfs: Dict[str, pd.DataFrame],
+    out_path: Path,
+    title: str = "Driver personas",
+    colors: Optional[Dict[str, Tuple[int, int, int]]] = None,
+) -> None:
+    """N-persona comparison plot.
+
+    Unlike :func:`plot_three_driver_comparison` (which is hard-coded to the
+    ``early / ontime / late`` tags), this variant takes an optional
+    ``colors`` map keyed by persona name and tolerates any number of
+    drivers. Used by :mod:`scripts.run_persona_comparison`; we pass the
+    PersonaDriver colors in so each archetype stays visually consistent
+    across the CLI demo and the pygame HUD.
+
+    The figure stacks three rows: speed vs. time, pedal demand vs. time,
+    and XY trajectory (equal aspect). That's the minimum set needed to
+    see that e.g. an Aggressive driver stays on throttle longer and dives
+    deeper into a corner than a Cautious driver.
+    """
+    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=False)
+    for name, df in dfs.items():
+        if colors is not None and name in colors:
+            r, g, b = colors[name]
+            color = (r / 255.0, g / 255.0, b / 255.0)
+        else:
+            color = None
+        axes[0].plot(df["t"], df["speed"], label=name, color=color, linewidth=1.3)
+        axes[1].plot(df["t"], df["throttle"], label=f"{name} thr",
+                     color=color, linewidth=1.0)
+        axes[1].plot(df["t"], df["brake_demand"], label=f"{name} brk",
+                     color=color, linestyle="--", linewidth=1.0)
+        axes[2].plot(df["x"], df["y"], label=name, color=color, linewidth=1.3)
+
+    axes[0].set_ylabel("speed (m/s)")
+    axes[0].set_xlabel("time (s)")
+    axes[0].grid(True, alpha=0.3)
+    axes[0].legend(loc="lower right")
+
+    axes[1].set_ylabel("pedal (solid=thr, dash=brk)")
+    axes[1].set_xlabel("time (s)")
+    axes[1].set_ylim(-0.05, 1.05)
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc="upper right", ncol=2, fontsize=7)
+
+    axes[2].set_aspect("equal")
+    axes[2].set_xlabel("x (m)")
+    axes[2].set_ylabel("y (m)")
+    axes[2].grid(True, alpha=0.3)
+    axes[2].legend(loc="upper right")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def plot_stopping_distances(
     distances: Dict[str, float],
     out_path: Path,
